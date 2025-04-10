@@ -1,151 +1,77 @@
-import socketio
-import time
+import paho.mqtt.client as mqtt
 import json
-import logging
 import RPi.GPIO as GPIO
-from datetime import datetime
+import time
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Disable GPIO warnings
+GPIO.setwarnings(False)
 
-# GPIO pins for stepper motor
-STEPPER_PINS = {
-    'IN1': 17,  # GPIO17
-    'IN2': 18,  # GPIO18
-    'IN3': 27,  # GPIO27
-    'IN4': 22   # GPIO22
-}
+# GPIO Configuration
+MOTOR_PIN = 17
+LED_PIN = 18
+BUTTON_PIN = 27
 
-# Stepper motor sequence (8-step sequence for smoother motion)
-STEP_SEQUENCE = [
-    [1, 0, 0, 1],
-    [1, 0, 0, 0],
-    [1, 1, 0, 0],
-    [0, 1, 0, 0],
-    [0, 1, 1, 0],
-    [0, 0, 1, 0],
-    [0, 0, 1, 1],
-    [0, 0, 0, 1]
-]
+# MQTT Configuration
+mqtt_broker = "localhost"
+mqtt_port = 1883
+mqtt_topic = "sentiment/feedback"
 
-class StepperMotor:
-    def __init__(self):
-        # Setup GPIO
-        GPIO.setmode(GPIO.BCM)
-        for pin in STEPPER_PINS.values():
-            GPIO.setup(pin, GPIO.OUT)
-            GPIO.output(pin, 0)
-        
-        self.current_step = 0
-        self.steps_per_revolution = 2048  # For 28BYJ-48 motor
-        self.delay = 0.001  # 1ms delay between steps
-        
-    def step(self, steps=1, direction=1):
-        """
-        Move the stepper motor a specified number of steps
-        :param steps: Number of steps to move
-        :param direction: 1 for clockwise, -1 for counter-clockwise
-        """
-        for _ in range(steps):
-            # Get current step pattern
-            pattern = STEP_SEQUENCE[self.current_step]
-            
-            # Set GPIO pins according to pattern
-            for i, pin in enumerate(STEPPER_PINS.values()):
-                GPIO.output(pin, pattern[i])
-            
-            # Move to next step
-            self.current_step = (self.current_step + direction) % len(STEP_SEQUENCE)
-            time.sleep(self.delay)
-    
-    def rotate(self, degrees=360, direction=1):
-        """
-        Rotate the motor by a specified number of degrees
-        :param degrees: Degrees to rotate
-        :param direction: 1 for clockwise, -1 for counter-clockwise
-        """
-        steps = int((degrees / 360) * self.steps_per_revolution)
-        self.step(steps, direction)
-    
-    def cleanup(self):
-        """Clean up GPIO pins"""
-        for pin in STEPPER_PINS.values():
-            GPIO.output(pin, 0)
-        GPIO.cleanup()
+print("Setting up GPIO...")
+# Setup GPIO
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(MOTOR_PIN, GPIO.OUT)
+GPIO.setup(LED_PIN, GPIO.OUT)
+GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
-class MotorController:
-    def __init__(self):
-        # Initialize Socket.IO client with reconnection settings
-        self.sio = socketio.Client(reconnection=True, reconnection_attempts=5, reconnection_delay=1)
-        
-        # Set up event handlers
-        self.sio.on('connect', self.on_connect)
-        self.sio.on('disconnect', self.on_disconnect)
-        self.sio.on('connect_error', self.on_connect_error)
-        self.sio.on('feedback_processed', self.on_feedback_processed)
-        
-        # Initialize stepper motor
-        self.motor = StepperMotor()
-        
-    def on_connect(self):
-        """Handle connection event"""
-        logger.info("✅ Connected to server!")
-        
-    def on_disconnect(self):
-        """Handle disconnection event"""
-        logger.info("❌ Disconnected from server - attempting to reconnect...")
-        
-    def on_connect_error(self, data):
-        """Handle connection error event"""
-        logger.error(f"❌ Connection error: {data}")
-        
-    def on_feedback_processed(self, data):
-        """Handle feedback processed event"""
-        try:
-            # Extract feedback data
-            feedback = data.get('feedback', {})
-            sentiment = feedback.get('sentiment', 'Unknown')
-            
-            # Check if sentiment is positive
-            if sentiment.lower() == 'positive':
-                logger.info("Positive sentiment detected! Dispensing fortune cookie...")
-                # Rotate motor 360 degrees clockwise to dispense cookie
-                self.motor.rotate(360, 1)
-                logger.info("Fortune cookie dispensed!")
-            else:
-                logger.info(f"Received {sentiment} sentiment - no action needed")
-                
-        except Exception as e:
-            logger.error(f"Error processing feedback: {str(e)}")
-    
-    def start(self):
-        """Start the motor controller"""
-        try:
-            # Connect to the Flask-SocketIO server
-            logger.info("Connecting to server...")
-            self.sio.connect('http://localhost:5001')
-            
-            # Keep the connection alive
-            while True:
-                time.sleep(1)
-                
-        except KeyboardInterrupt:
-            logger.info("Stopping motor controller...")
-        except Exception as e:
-            logger.error(f"Error: {str(e)}")
-        finally:
-            if self.sio.connected:
-                self.sio.disconnect()
-            self.motor.cleanup()
+# Initialize pins to LOW
+GPIO.output(MOTOR_PIN, GPIO.LOW)
+GPIO.output(LED_PIN, GPIO.LOW)
 
-def main():
-    print("\n🔄 Fortune Cookie Motor Controller")
-    print("--------------------------------")
-    print("Press Ctrl+C to exit\n")
-    
-    controller = MotorController()
-    controller.start()
+def on_connect(client, userdata, flags, rc):
+    print(f"Connected to MQTT broker with result code {rc}")
+    client.subscribe(mqtt_topic)
+    print(f"Subscribed to topic: {mqtt_topic}")
 
-if __name__ == "__main__":
-    main() 
+def on_message(client, userdata, msg):
+    try:
+        print(f"Received message: {msg.payload.decode()}")
+        data = json.loads(msg.payload.decode())
+        sentiment = data.get('sentiment', '').lower()
+        print(f"Processing sentiment: {sentiment}")
+        
+        if sentiment == 'positive':
+            print("Dispensing fortune cookie...")
+            print("Turning motor ON")
+            GPIO.output(MOTOR_PIN, GPIO.HIGH)
+            time.sleep(2)
+            print("Turning motor OFF")
+            GPIO.output(MOTOR_PIN, GPIO.LOW)
+        elif sentiment == 'neutral':
+            print("Blinking LED...")
+            for _ in range(3):
+                GPIO.output(LED_PIN, GPIO.HIGH)
+                time.sleep(0.5)
+                GPIO.output(LED_PIN, GPIO.LOW)
+                time.sleep(0.5)
+    except Exception as e:
+        print(f"Error processing message: {e}")
+
+# Create MQTT client
+client = mqtt.Client()
+client.on_connect = on_connect
+client.on_message = on_message
+
+print("Starting microcontroller...")
+try:
+    # Connect to MQTT broker
+    print("Connecting to MQTT broker...")
+    client.connect(mqtt_broker, mqtt_port, 60)
+    print("Starting MQTT loop...")
+    client.loop_forever()
+except KeyboardInterrupt:
+    print("\nShutting down...")
+finally:
+    print("Cleaning up...")
+    client.loop_stop()
+    client.disconnect()
+    GPIO.cleanup()
